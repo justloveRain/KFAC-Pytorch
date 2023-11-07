@@ -184,7 +184,8 @@ log_dir = os.path.join(args.log_dir, args.dataset, args.network, args.optimizer,
 if not os.path.isdir(log_dir):
     """
     如果log_dir不是一个已经存在的目录（即os.path.isdir(log_dir)返回False），那么就执行后面的代码块。
-    最后，os.makedirs(log_dir)这一行代码会创建log_dir指定的目录。如果在创建过程中需要创建多级目录，os.makedirs会自动创建所有需要的中间目录。
+    最后，os.makedirs(log_dir)这一行代码会创建log_dir指定的目录。
+    如果在创建过程中需要创建多级目录，os.makedirs会自动创建所有需要的中间目录。
     """
     os.makedirs(log_dir)
 writer = SummaryWriter(log_dir)
@@ -198,11 +199,18 @@ def train(epoch):
     total = 0
 
     lr_scheduler.step()
+    #tag = optimizer name
     desc = ('[%s][LR=%s] Loss: %.3f | Acc: %.3f%% (%d/%d)' %
             (tag, lr_scheduler.get_lr()[0], 0, 0, correct, total))
 
     writer.add_scalar('train/lr', lr_scheduler.get_lr()[0], epoch)
 
+    """
+    创建了一个进度条，用来显示训练的进度。
+    tqdm是一个Python的进度条库，可以用来显示循环的进度。
+    enumerate(trainloader)是对训练数据进行迭代。
+    total=len(trainloader)设置了进度条的总长度，desc=desc设置了进度条的描述，leave=True表示进度条在循环结束后不会被清除。
+    """
     prog_bar = tqdm(enumerate(trainloader), total=len(trainloader), desc=desc, leave=True)
     for batch_idx, (inputs, targets) in prog_bar:
         inputs, targets = inputs.to(args.device), targets.to(args.device)
@@ -210,9 +218,36 @@ def train(epoch):
         outputs = net(inputs)
         loss = criterion(outputs, targets)
         if optim_name in ['kfac', 'ekfac'] and optimizer.steps % optimizer.TCov == 0:
+            """
+            只有当优化器的名称在['kfac', 'ekfac']中，并且优化器的步数是optimizer.TCov的倍数时，才会执行。
+            在这种情况下，代码会计算一次采样的Fisher信息矩阵。(卷积K-FAC论文3.1节)
+            首先，将optimizer.acc_stats设置为True，然后使用torch.no_grad()来确保以下的操作不会被记录在计算图中。
+            然后，从输出的softmax分布中采样得到sampled_y，并计算与sampled_y之间的损失loss_sample。
+            然后，对loss_sample进行反向传播，但保留计算图，因为我们还需要对原始的loss进行反向传播。
+            最后，将optimizer.acc_stats设置为False，并清零梯度。
+            """
             # compute true fisher
             optimizer.acc_stats = True
             with torch.no_grad():
+                """
+                torch.multinomial 是 PyTorch 中的一个函数，它用于从给定的输入张量中抽取样本。
+                输入张量的每个元素应该代表相应类别的相对概率。
+                例如，如果你有一个张量 [0.2, 0.3, 0.5]，那么第一个类别被抽取的概率是 0.2，第二个类别被抽取的概率是 0.3，第三个类别被抽取的概率是 0.5。
+                这个函数的第一个参数是输入张量，第二个参数是要抽取的样本数量。返回的是一个张量，包含了抽取的样本的索引。
+                
+                ====================
+                import torch
+                # 创建一个张量，表示三个类别的概率分布
+                probabilities = torch.tensor([0.2, 0.3, 0.5])
+                # 从这个概率分布中抽取 10 个样本
+                samples = torch.multinomial(probabilities, 10)
+                print(samples)
+                ====================
+
+                这段代码可能会输出类似以下的结果：
+                tensor([2, 2, 1, 2, 2, 0, 2, 1, 2, 2])
+                这表示在 10 次抽样中，第一个类别被抽取了 1 次，第二个类别被抽取了 2 次，第三个类别被抽取了 7 次。这个结果会每次运行时都会有所不同，因为 torch.multinomial 是随机抽样。
+                """
                 sampled_y = torch.multinomial(torch.nn.functional.softmax(outputs.cpu().data, dim=1),
                                               1).squeeze().cuda()
             loss_sample = criterion(outputs, sampled_y)
@@ -281,7 +316,7 @@ def test(epoch):
                                                      args.dataset,
                                                      args.network,
                                                      args.depth))
-        best_acc = acc
+        best_acc = acc          #best acc为全局变量 测试结束后取best acc
 
 
 def main():
