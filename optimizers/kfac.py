@@ -164,7 +164,7 @@ class KFACOptimizer(optim.Optimizer):
         else:
             param_grad_mat = m.weight.grad.data             #全连接层权重梯度不做处理
         if m.bias is not None:
-            param_grad_mat = torch.cat([param_grad_mat, m.bias.grad.data.view(-1, 1)], 1)       #卷积和全连接处理一样，偏置梯度转为列向量拼接到权重梯度矩阵的最后一列
+            param_grad_mat = torch.cat([param_grad_mat, m.bias.grad.data.view(-1, 1)], 1)     #卷积和全连接处理一样，偏置梯度转为列向量拼接到权重梯度矩阵的最后一列
         return param_grad_mat
 
     def _get_natural_grad(self, m, param_grad_mat, damping):
@@ -192,10 +192,10 @@ class KFACOptimizer(optim.Optimizer):
             v[1] = v[1].view(m.bias.grad.data.size())
         else:
             v = [v.view(m.weight.grad.data.size())]
-
+            
         return v
 
-    def _kl_clip_and_update_grad(self, updates, lr):        #卷积kfac论文附录A.1
+    def _kl_clip_and_update_grad(self, updates, lr):        #paper conv-kfac appendix A.1
         # do kl clip
         vg_sum = 0
         for m in self.modules:
@@ -204,14 +204,14 @@ class KFACOptimizer(optim.Optimizer):
             if m.bias is not None:
                 vg_sum += (v[1] * m.bias.grad.data * lr ** 2).sum().item()
         nu = min(1.0, math.sqrt(self.kl_clip / vg_sum))
-
+        # update grad with fvp
         for m in self.modules:
             v = updates[m]
-            m.weight.grad.data.copy_(v[0])
-            m.weight.grad.data.mul_(nu)
+            m.weight.grad.data.copy_(v[0])      # update the weight
+            m.weight.grad.data.mul_(nu)     # multiply the kl_clip factor
             if m.bias is not None:
-                m.bias.grad.data.copy_(v[1])
-                m.bias.grad.data.mul_(nu)
+                m.bias.grad.data.copy_(v[1])        # update the bias
+                m.bias.grad.data.mul_(nu)       # multiply the kl_clip factor
 
     def _step(self, closure):
         # FIXME (CW): Modified based on SGD (removed nestrov and dampening in momentum.)
@@ -219,23 +219,23 @@ class KFACOptimizer(optim.Optimizer):
         for group in self.param_groups:
             weight_decay = group['weight_decay']
             momentum = group['momentum']
-            for p in group['params']:
-                if p.grad is None:
+            for param in group['params']:
+                if param.grad is None:
                     continue
-                d_p = p.grad.data
-                if weight_decay != 0 and self.steps >= 20 * self.TCov:          #正则化
-                    d_p.add_(weight_decay, p.data)
-                if momentum != 0:                                       #动量
-                    param_state = self.state[p]
+                d_p = param.grad.data
+                if weight_decay != 0 and self.steps >= 20 * self.TCov:          # do regularization after 20 TCov
+                    d_p.add_(weight_decay, param.data)
+                if momentum != 0:                                       # add momentum
+                    param_state = self.state[param]
                     if 'momentum_buffer' not in param_state:
-                        buf = param_state['momentum_buffer'] = torch.zeros_like(p.data)
+                        buf = param_state['momentum_buffer'] = torch.zeros_like(param.data)
                         buf.mul_(momentum).add_(d_p)
                     else:
                         buf = param_state['momentum_buffer']
                         buf.mul_(momentum).add_(1, d_p)
                     d_p = buf
 
-                p.data.add_(-group['lr'], d_p)
+                param.data.add_(-group['lr'], d_p)      # update the parameters
 
     def step(self, closure=None):
         # FIXME(CW): temporal fix for compatibility with Official LR scheduler.
@@ -243,14 +243,14 @@ class KFACOptimizer(optim.Optimizer):
         lr = group['lr']
         damping = group['damping']
         updates = {}
-        for m in self.modules:      #逐层遍历，更新F逆的kronecker因子和计算fvp
+        for m in self.modules:
             classname = m.__class__.__name__
             if self.steps % self.TInv == 0:
-                self._update_inv(m)
-            param_grad_mat = self._get_matrix_form_grad(m, classname)       #获取第m层的(偏置拼接到权重矩阵最后一列得到的)梯度矩阵
-            fvp = self._get_natural_grad(m, param_grad_mat, damping)          #获取第m层的权重和偏置的fvp
-            updates[m] = fvp          #第m层的权重和偏置的fvp放入updates中
-        self._kl_clip_and_update_grad(updates, lr)              #kl剪裁和更新梯度
+                self._update_inv(m)                                         #update the inverse of the fisher by implementing eigen decomposition of kronecker factor
+            param_grad_mat = self._get_matrix_form_grad(m, classname)       #acquiring the grad matrix of m layer (grad_mat=cat[weight,bias])
+            fvp = self._get_natural_grad(m, param_grad_mat, damping)          # acquiring the fisher vector product if m layer
+            updates[m] = fvp                                                # put the fvp of m layer about bias and weight into updates[m]
+        self._kl_clip_and_update_grad(updates, lr)                          #do kl clip and update grad
 
         self._step(closure)         #update the parameters
         self.steps += 1

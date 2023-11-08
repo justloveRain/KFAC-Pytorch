@@ -17,24 +17,39 @@ def try_contiguous(x):
         x = x.contiguous()
     return x
 
-#??????????????????????????????????????????????????????????????????????
+
 def _extract_patches(x, kernel_size, stride, padding):
     """
-    :param x: The input feature maps.  (batch_size, in_c, h, w)
-    :param kernel_size: the kernel size of the conv filter (tuple of two elements)
-    :param stride: the stride of conv operation  (tuple of two elements)
-    :param padding: number of paddings. be a tuple of two elements
-    :return: (batch_size, out_h, out_w, in_c*kh*kw)
+    卷积KFAC论文2.3.1节
+        :param x: The input feature maps.  
+        (batch_size, in_channel, h, w)
+    :param kernel_size: the kernel size of the conv 2d filter 
+        (tuple of two elements ie.[kernel_h, kernel_w])
+    :param stride: the stride of conv 2d operation. 
+        (tuple of two elements ie.[stride_h, stride_w])
+    :param padding: number of paddings. 
+        (tuple of two elements ie.[padding_h, padding_w])
+    :return: extracted batches for the input feature maps of corresponding conv2d layer.
+        (batch_size, out_h, out_w, in_c*kernel_h*kernel_w)
     """
-    if padding[0] + padding[1] > 0:
+    if padding[0] + padding[1] > 0:         #如果有padding，就在x的dim=2和dim=3维度上进行padding
         x = F.pad(x, (padding[1], padding[1], padding[0],
-                      padding[0])).data  # Actually check dims
-    x = x.unfold(2, kernel_size[0], stride[0])
-    x = x.unfold(3, kernel_size[1], stride[1])
-    x = x.transpose_(1, 2).transpose_(2, 3).contiguous()
+                      padding[0])).data       
+    #把输入特征图每个要与卷积核进行卷积运算的区域单独提取出来
+    """
+    unfold是PyTorch中的一个方法，用于在张量的某一维度上滑动窗口并提取子张量。
+    这个方法非常适合于实现卷积操作，因为卷积就是在输入特征图上滑动窗口并提取区域。
+    unfold方法接收三个参数：维度dimension，滑动窗口的大小size，和步长step。
+    它会在指定的维度上滑动窗口，每次移动step个单位，提取大小为size的子张量。
+    例如，如果我们有一个形状为(batch_size, in_channel, h, w)的输入特征图x，我们可以使用unfold方法在高度和宽度维度上滑动窗口。
+    提取出每个要与卷积核进行卷积运算的区域。这就是_extract_patches函数中unfold方法的用法。
+    """
+    x = x.unfold(2, kernel_size[0], stride[0])          #按行
+    x = x.unfold(3, kernel_size[1], stride[1])          #按列
+    x = x.transpose_(1, 2).transpose_(2, 3).contiguous()            #交换维度，使得卷积运算按先行后列顺序进行
     x = x.view(
         x.size(0), x.size(1), x.size(2),
-        x.size(3) * x.size(4) * x.size(5))
+        x.size(3) * x.size(4) * x.size(5))      #转换为向量
     return x
 
 
@@ -47,7 +62,7 @@ def update_running_stat(aa, m_aa, stat_decay):
     :param m_aa: the updated running estimates of covariance of activation or gradient.
     :param stat_decay: the parameter determines the time scale for the moving average.
     :return: None
-    Function: m_aa = stat_decay*m_aa + (1-stat_decay)*aa
+    :Function: m_aa = stat_decay*m_aa + (1-stat_decay)*aa
     """
     # using inplace operation to save memory!
     m_aa *= stat_decay / (1 - stat_decay)
@@ -99,6 +114,7 @@ class ComputeCovA:
         :return:__call__ returns the covariance of activation
         """
         return cls.__call__(a, layer)
+    
 
     @classmethod
     def __call__(cls, a, layer):
@@ -114,24 +130,27 @@ class ComputeCovA:
 
     @staticmethod
     def cova_conv2d(a, layer):
+        """ compute the covariance of activation in conv2d layer. """
         batch_size = a.size(0)
-        a = _extract_patches(a, layer.kernel_size, layer.stride, layer.padding)
-        spatial_size = a.size(1) * a.size(2)
-        a = a.view(-1, a.size(-1))
-        if layer.bias is not None:
+        a = _extract_patches(a, layer.kernel_size, layer.stride, layer.padding)     #extract patches every layer
+        spatial_size = a.size(1) * a.size(2)        #计算每个patch的空间大小
+        a = a.view(-1, a.size(-1))      #合并patches的0,1,2维度，变成二维张量
+        if layer.bias is not None:              # 如果有偏置参数，就在a的最后一列加上全1的一列向量，之前我们把偏置参数拼接到了权重矩阵的最后一列
+            a = torch.cat([a, a.new(a.size(0), 1).fill_(1)], 1)
             a = torch.cat([a, a.new(a.size(0), 1).fill_(1)], 1)
         a = a/spatial_size
         # FIXME(CW): do we need to divide the output feature map's size?
-        return a.t() @ (a / batch_size)
+        return a.t() @ (a / batch_size)     # (1/batch_size)*中间变量激活的内积
 
     @staticmethod
     def cova_linear(a, layer):
+        """ compute the covariance of activation in linear layer. """
         # a size: batch_size * in_dim
         # cov_a: in_dim * in_dim
         batch_size = a.size(0)
-        if layer.bias is not None:              #如果有偏置参数，就在a的最后一列加上全1的一列向量，之前我们把偏置参数拼接到了权重矩阵的最后一列
+        if layer.bias is not None:              # 如果有偏置参数，就在a的最后一列加上全1的一列向量，之前我们把偏置参数拼接到了权重矩阵的最后一列
             a = torch.cat([a, a.new(a.size(0), 1).fill_(1)], 1)     
-        return a.t() @ (a / batch_size)         #(1/batch_size)*中间变量激活的内积
+        return a.t() @ (a / batch_size)         # (1/batch_size)*中间变量激活的内积
 
 
 class ComputeCovG:
@@ -162,16 +181,17 @@ class ComputeCovG:
 
     @staticmethod
     def covg_conv2d(g, layer, batch_averaged):
+        """ compute the covariance of gradient in conv2d layer. """
         # g: batch_size * n_filters * out_h * out_w
         # n_filters is actually the output dimension (analogous to Linear layer)
         spatial_size = g.size(2) * g.size(3)
-        batch_size = g.shape[0]
-        g = g.transpose(1, 2).transpose(2, 3)
-        g = try_contiguous(g)
-        g = g.view(-1, g.size(-1))
+        batch_size = g.shape[0]             #梯度的第0维是batch_size
+        g = g.transpose(1, 2).transpose(2, 3)       
+        g = try_contiguous(g)       #continuous g after transpose
+        g = g.view(-1, g.size(-1))      #合并gradient前几个维度
 
         if batch_averaged:
-            g = g * batch_size
+            g = g * batch_size      #cancel batch_averaged
         g = g * spatial_size
         cov_g = g.t() @ (g / g.size(0))
 
@@ -179,6 +199,7 @@ class ComputeCovG:
 
     @staticmethod
     def covg_linear(g, layer, batch_averaged):
+        """ compute the covariance of gradient in linear layer. """
         # g: batch_size * out_dim
         # cov_g: out_dim*out_dim
         batch_size = g.size(0)
@@ -190,7 +211,7 @@ class ComputeCovG:
 
 
 class ComputeMatGrad:
-
+    """ ongly for EKFAC """
     @classmethod
     def __call__(cls, input, grad_output, layer):
         if isinstance(layer, nn.Linear):
@@ -200,6 +221,7 @@ class ComputeMatGrad:
         else:
             raise NotImplementedError
         return grad
+        batch_size = g.size(0)
 
     @staticmethod
     def linear(input, grad_output, layer):
