@@ -26,6 +26,7 @@ apps = {
 
 
 def grid_search(args):
+    """ Grid Search to determine the best hyper-parameters for each optimizer. """
     scripts = []
     if args.optimizer in ['kfac', 'ekfac']:
         template = 'python main.py ' \
@@ -56,8 +57,8 @@ def grid_search(args):
                    '--learning_rate %f ' \
                    '--weight_decay %f %s'
         app = apps[args.network]
-        lrs = [3e-1, 1e-1, 3e-2]
-        wds = [1e-2, 3e-3, 1e-3, 3e-4, 1e-4]
+        lrs = [3e-1, 1e-1, 3e-2]            #LR Schedule
+        wds = [1e-2, 3e-3, 1e-3, 3e-4, 1e-4]        #Weight Decay Schedule
 
         for lr in lrs:
             for wd in wds:
